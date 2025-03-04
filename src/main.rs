@@ -1,84 +1,130 @@
-use std::collections::HashMap;
 
 use reqwest::blocking::Client;
 use reqwest::header::USER_AGENT;
+use serde_xml_rs::from_str;
+use serde::Deserialize;
+use std::error::Error;
 
 
-/// Fetch {ticker : cik} key-value pairs from SEC website.
-pub fn list() -> Result<HashMap<String, u64>, reqwest::Error> {
 
-    // URL of interest
-    let url = "https://www.sec.gov/include/ticker.txt";
+/// structs to deserialize the SEC Atom XML response
+#[derive(Debug, Deserialize)]
+#[serde(rename = "feed")]
+struct Feed {
+    #[serde(rename = "entry", default)]
+    entries: Vec<Entry>,
+}
 
-    // build a client
-    let client = Client::builder().build()?;
+#[derive(Debug, Deserialize)]
+struct Entry {
+    #[serde(rename = "link")]
+    link: Link,
+}
 
-    // valid User-Agent header as recommended by the SEC
-    let header = "MyOrgName/1.0 (my.email@address.com) - For academic or research purposes";
-    let response = client.get(url).header(USER_AGENT, header).send()?.text();
+#[derive(Debug, Deserialize)]
+struct Link {
+    #[serde(rename = "href")]
+    href: String,
+}
 
-    // store and return pairs in this map
-    let mut map = HashMap::new();
 
-    // see if we reached URL
-    match response {
 
-        Ok(body) => {
-            // split body into rows
-            let rows = body.split("\n").collect::<Vec<&str>>();
 
-            // iterate over each row
-            for row in rows {
+pub struct SecClient {
+    client: Client,
+    header: String,
+}
 
-                // split row into columns
-                let ticker_cik: Vec<&str> = row.split("\t").collect();
+//let header = "MyOrgName/1.0 (my.email@address.com) - For academic or research purposes";
+//let header = String::from("Name/1.0 (my.email@address.com) - Research");
+impl SecClient {
+    pub fn new() -> Result<Self, reqwest::Error> {
+        let header = String::from("my.email@address.com");
+        let client = Client::builder().build()?;
+        return Ok(SecClient { client, header });
+    }
 
-                // tell-tale sign of a User-Agent error
-                if ticker_cik.len() < 2 {
-                    panic!("ERROR: Exceeded request rate threshold on {}. \
-                            User-Agent header expired.", &url);
-                }
+    // GET request from basic URL
+    pub fn get(&self, url: &str) -> Result<String, reqwest::Error> {
+        return self.client.get(url).header(USER_AGENT,
+               self.header.as_str()).send()?.text();
+    }
 
-                // if SEC lets us in, add key-value pair
-                else if let Ok(cik) = ticker_cik[1].parse::<u64>() {
-                    map.insert(ticker_cik[0].to_string(), cik);
-                }
-            }
+    // GET request from URL with query parameters
+    pub fn get_with_params(&self, url: &str, params: &[(&str, &str)]) ->
+                           Result<String, reqwest::Error> {
 
-            return Ok(map);
-        },
-
-        Err(e) => {
-            panic!("ERROR: Could not reach: {}. {}.", &url, &e);
-        },
+        return self.client.get(url).query(params).header(USER_AGENT,
+               self.header.as_str()).send()?.text();
     }
 }
 
 
-/// Given a {ticker : cik} key-value pairs, return the cik,
-/// with 10 valid characters.
-pub fn cik(map: &HashMap<String, u64>, ticker: &str) -> Option<String> {
-    match map.get(&ticker.to_lowercase()) {
-        Some(cik) => {
-            return Some(format!("{:010}", *cik));
-        },
-        None => {
-            return None;
-        },
+
+
+/// Get document URLs for a given ticker and date
+pub fn documents(sec_client: &SecClient, ticker: &str, date: &str) -> Result<Vec<String>, Box<dyn Error>> {
+
+    let params = [
+        ("action", "getcompany"),
+        ("ticker", ticker),
+        ("type", "10-Q"),
+        ("dateb", date),
+        ("owner", "exclude"),
+        ("start", ""),
+        ("output", "atom"),
+        ("count", "100"),
+    ];
+
+    let base_url = "https://www.sec.gov/cgi-bin/browse-edgar";
+    let response = sec_client.get_with_params(base_url, &params)?;
+
+    // deserialize the Atom feed XML into 'Feed' struct
+    let feed: Feed = from_str(&response)?;
+
+    let mut documents_list = Vec::new();
+
+    for entry in feed.entries {
+        //println!("{:?}", entry.link.href);
+
+        let mut documents_url = entry.link.href
+            .replace("-index.html", "/index.json")
+            .replace("-index.htm", "/index.json")
+            .replace("-", "");
+
+        //println!("{:?}", documents_url);
+
+        // adjust the URL if it has exactly 10 parts
+        let split_items: Vec<&str> = documents_url.split("/").collect();
+        if split_items.len() == 10 {
+            let mut items = split_items;
+            items.remove(7);
+            documents_url = items.join("/");
+        }
+
+        //println!("{:?}", documents_url);
+        documents_list.push(documents_url);
     }
+    Ok(documents_list)
 }
+
+
+
+
+
 
 
 
 fn main() {
-    let map = list().unwrap();
 
-    /*
-    for (key, value) in &map {
-        println!("Key: {}, Value: {}", key, value);
+    let sec_client = SecClient::new()
+                                .expect("Failed to create client");
+
+    let docs = documents(&sec_client, "aapl", "").unwrap();
+
+    for d in docs {
+        println!("{}", d);
     }
-    */
 
-    let cik = cik(&map, "aapl").unwrap_or(String::from("None"));
-    println!("{}", cik);
+
 }
