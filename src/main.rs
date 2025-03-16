@@ -7,13 +7,12 @@ use reqwest::blocking::Client;
 use reqwest::header::USER_AGENT;
 
 use serde::Deserialize;
-use serde_xml_rs::from_str;
 use serde_json::Value;
+use serde_xml_rs::from_str;
 
 
 
-
-/// structs to deserialize the SEC Atom XML response
+/// Root element of the SEC Atom XML response.
 #[derive(Debug, Deserialize)]
 #[serde(rename = "feed")]
 struct Feed {
@@ -21,12 +20,14 @@ struct Feed {
     entries: Vec<Entry>,
 }
 
+/// Individual filing entry.
 #[derive(Debug, Deserialize)]
 struct Entry {
     #[serde(rename = "link")]
     link: Link,
 }
 
+/// Represents link to a specific filing.
 #[derive(Debug, Deserialize)]
 struct Link {
     #[serde(rename = "href")]
@@ -123,7 +124,8 @@ impl SecClient {
 
 
 /// Get document URLs for a given ticker and date
-pub fn documents(sec_client: &SecClient, ticker: &str, date: &str) -> Result<Vec<String>, Box<dyn Error>> {
+pub fn documents(sec_client: &SecClient, ticker: &str, date: &str)
+                 -> Result<Vec<String>, Box<dyn Error>> {
 
     let params = [
         ("action", "getcompany"),
@@ -173,7 +175,7 @@ fn filing_summaries(sec_client: &SecClient, documents_list: &Vec<String>)
     let mut summaries = vec![];
 
     // iterate over each JSON index URL
-    for document in documents_list {
+    for document in &documents_list[0..1] {
 
         // GET request
         let response = sec_client.get(&document).unwrap();
@@ -207,7 +209,7 @@ fn filing_summaries(sec_client: &SecClient, documents_list: &Vec<String>)
             Some(url) => {
                 summaries.push(url);
             }
-            // if not found, simply jump to next doc list
+            // if not found, simply jump to next doc
             None => {
                 continue;
             }
@@ -219,20 +221,100 @@ fn filing_summaries(sec_client: &SecClient, documents_list: &Vec<String>)
 
 
 
+/// Root element of the SEC XML response.
+#[derive(Debug, Deserialize)]
+struct FilingSummary {
+    #[serde(rename = "MyReports")]
+    filing: Reports,
+}
+
+/// Represents the `<MyReports>` section in the XML.
+#[derive(Debug, Deserialize)]
+#[serde(rename = "MyReports")]
+struct Reports {
+    #[serde(rename = "Report", default)]
+    reports: Vec<Report>,
+}
+
+/// Individual report entries inside `<MyReports>`.
+#[derive(Debug, Deserialize)]
+struct Report {
+    #[serde(rename = "ShortName")]
+    shortname: Option<String>,
+    #[serde(rename = "HtmlFileName")]
+    htmlfilename: Option<String>,
+    #[serde(rename = "XmlFileName")]
+    xmlfilename: Option<String>,
+}
+
+
+fn master_reports(sec_client: &SecClient, xml_summaries: &[String])
+                  -> Result<Vec<(String, String)>, Box<dyn Error>> {
+
+    let mut all_reports = vec![];
+
+    for xml_url in xml_summaries {
+        // GET request
+        let xml_content = sec_client.get(xml_url)?;
+
+        // get base URL
+        let base_url = xml_url.replace("FilingSummary.xml", "");
+
+        // deserialize filing elements
+        let xml_summary: FilingSummary = from_str(&xml_content)?;
+
+        // extract reports from the XML summary
+        let mut reports = xml_summary.filing.reports;
+
+        // exclude the last report which should aways be the 'base_url'
+        if reports.len() > 1 {
+            reports.pop();
+        }
+
+        // process each report
+        for report in reports {
+            // prefer htmlfilename over xmlfilename
+            let file = report.htmlfilename.or(report.xmlfilename).unwrap_or_default();
+
+            // grab url and its short description
+            let url = format!("{}{}", base_url, file);
+            let shortname = report.shortname.unwrap_or_default();
+            all_reports.push((shortname, url));
+        }
+    }
+    Ok(all_reports)
+}
+
+
+
 fn main() {
 
-    let sec_client = SecClient::new()
-                                .expect("Failed to create client");
+    let sec_client = SecClient::new().expect("Failed to create client");
 
     let docs = documents(&sec_client, "aapl", "").unwrap();
 
+    /*
+    println!("\ndocuments:");
     for d in &docs {
         println!("{}", d);
     }
+    */
 
     let filings = filing_summaries(&sec_client, &docs).unwrap();
 
+    /*
+    println!("\nfiling summary:");
     for f in &filings {
         println!("{}", f);
+    }
+    */
+
+    let reports = master_reports(&sec_client, &filings).unwrap();
+
+    println!("\nmaster reports:");
+    for r in &reports {
+        let (desc, url) = r;
+        println!("{}:", desc);
+        println!("{}\n", url);
     }
 }
