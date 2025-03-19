@@ -10,6 +10,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use serde_xml_rs::from_str;
 
+use scraper::{Html, Selector};
 
 
 /// Root element of the SEC Atom XML response.
@@ -287,6 +288,111 @@ fn master_reports(sec_client: &SecClient, xml_summaries: &[String])
 
 
 
+/// Struct to hold the parsed table data.
+pub struct StatementData {
+    pub headers: Vec<Vec<String>>,
+    pub sections: Vec<String>,
+    pub data: Vec<Vec<String>>,
+}
+
+
+
+/// Parses HTML content of a SEC filing page, extract statement
+/// data.
+pub fn parse_html_statement_data(html: &str) -> StatementData {
+
+    let mut statement_data = StatementData {
+        headers: Vec::new(),
+        sections: Vec::new(),
+        data: Vec::new(),
+    };
+
+
+    // parse html
+    let document = Html::parse_document(html);
+    let table_selector = Selector::parse("table").expect("Failed to parse 'table' tag");
+    let tr_selector = Selector::parse("tr").expect("Failed to parse 'tr' tag");
+    let th_selector = Selector::parse("th").expect("Failed to parse 'th' tag");
+    let td_selector = Selector::parse("td").expect("Failed to parse 'td' tag");
+    let strong_selector = Selector::parse("strong").expect("Failed to parse 'strong' tag");
+
+
+    // find the first table element
+    if let Some(table) = document.select(&table_selector).next() {
+        for tr in table.select(&tr_selector) {
+            let ths: Vec<_> = tr.select(&th_selector).collect();
+            let tds: Vec<_> = tr.select(&td_selector).collect();
+            let strongs: Vec<_> = tr.select(&strong_selector).collect();
+
+            // document header
+            if !ths.is_empty() {
+                let header_row = ths.iter().map(|col| col.text()
+                                 .collect::<Vec<_>>().join(" ").trim()
+                                 .to_string()).collect();
+                statement_data.headers.push(header_row);
+            }
+
+            // document section row (under header)
+            else if !tds.is_empty() && !strongs.is_empty() {
+                let section_row = tds[0].text().collect::<Vec<_>>().join(" ")
+                                  .trim().to_string();
+                statement_data.sections.push(section_row);
+            }
+
+            // data rows (under section)
+            else if !tds.is_empty() && strongs.is_empty() {
+                let data_row: Vec<String> = tds.iter().map(|col| col.text()
+                                            .collect::<Vec<_>>().join(" ").trim()
+                                            .to_string()).collect();
+                statement_data.data.push(data_row);
+            }
+
+            else {
+                println!("\nERROR: Unrecognized HTML structure in a <tr>.\n");
+            }
+        }
+    }
+
+    else {
+        println!("\nERROR: No <table> found in the HTML.\n");
+    }
+
+    return statement_data;
+}
+
+
+
+pub fn balance_sheets(sec_client: &SecClient, xml_summaries:
+                      &Vec<(String, String)>) -> Result<StatementData, Box<dyn Error>> {
+
+    let keywords = ["balance sheets", "financial condition"];
+
+
+    // find the shortname == keywords, and parse its url
+    for (name, url) in xml_summaries.iter() {
+        if keywords.iter().any(|&kw| name.to_lowercase().contains(kw)) {
+
+            println!("{}", url);
+
+            // GET html
+            let html = sec_client.get(&url)?;
+
+            // parse html
+            let statement_data = parse_html_statement_data(&html);
+
+            return Ok(statement_data);
+        }
+    }
+
+    return Err(Box::new(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        "Could not find balance sheet url.",
+    )));
+}
+
+
+
+
 fn main() {
 
     let sec_client = SecClient::new().expect("Failed to create client");
@@ -317,4 +423,12 @@ fn main() {
         println!("{}:", desc);
         println!("{}\n", url);
     }
+
+
+    let bs = balance_sheets(&sec_client, &reports).unwrap();
+
+    println!("\n{:?}", bs.headers);
+    println!("\n{:?}", bs.sections);
+    println!("\n{:?}", bs.data);
+
 }
